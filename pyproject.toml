@@ -1,0 +1,25 @@
+[project]
+name = "agent-nasssim"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "docker>=7.2.0",
+    "httpx>=0.28.1",
+    "mcp[cli]>=2.3.0",
+    "openai>=3.37.0",
+    "pydantic>=2.14.1",
+    "python-dotenv>=1.2.4",
+]
+
+
+# To add the uv run sandbox, it execute the main() in sandbox.py
+[tool.uv]
+package = true
+
+[tool.setuptools]
+py-modules = ["sandbox"]
+
+[project.scripts]
+sandbox = "sandbox:main" # can have sandbox.cli:main if main is in cli.py in sandbox directory
