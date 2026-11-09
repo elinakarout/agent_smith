@@ -22,4 +22,4 @@ package = true
 py-modules = ["sandbox"]
 
 [project.scripts]
-sandbox = "sandbox:main" # can have sandbox.cli:main if main is in cli.py in sandbox directory
+sandbox = "sandbox.cli:main"

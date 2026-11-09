@@ -1,0 +1,10 @@
+# uv artifacts
+uv.lock
+.venv/
+agent_nasssim.egg-info/
+
+# python cache
+__pycache__/
+
+# given
+moulinette/
