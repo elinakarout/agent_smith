@@ -1,7 +1,7 @@
 [project]
 name = "agent-nasssim"
 version = "0.1.0"
-description = "Dont stay awake for too long"
+description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
