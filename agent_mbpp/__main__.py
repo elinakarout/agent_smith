@@ -24,7 +24,7 @@ def main():
     output_path = Path(args[3])
     try:
         with open(task_path, "r") as f:
-            task_data = f.read();
+            task_data = f.read()
             task = MBPPTaskInput.model_validate_json(task_data)
     except FileNotFoundError:
         print("Error: File Not Found")
