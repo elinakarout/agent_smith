@@ -1,0 +1,4 @@
+moulinette/
+.venv/
+uv.lock
+.env
