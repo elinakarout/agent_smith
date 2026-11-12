@@ -1,48 +1,86 @@
-import sys
 from models.models import SWEBenchTaskInput, SolutionOutput
 from pathlib import Path
+from pydantic import ValidationError
+import argparse
 
-def run_model():
+def run_model(model_name: str, provider_url: str):
     pass
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Run an SWE-bench task using an agent."
+    )
+
+    parser.add_argument(
+        "--task-file",
+        type=Path,
+        required=True,
+        help="Path to the SWE-bench task input JSON file."
+    )
+
+    parser.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        help="Path where the output will be saved."
+    )
+
+    parser.add_argument(
+    "--provider-url",
+    type=str,
+    default=None,
+    help="LLM provider API URL (optional)."
+)
+
+    parser.add_argument(
+        "--model-name",
+        type=str,
+        default=None,
+        help="Model name (optional)."
+    )
+
+    return parser.parse_args()
+
+
 def main() -> None:
-    if len(sys.argv) == 5: # Should we include provider url and model name as mandatory parameters?
-        args = sys.argv[1:]
-        if args[0] != "--task-file":
-            print("Error: Missing --task-file flag")
-            return
-        if args[2] != "--output":
-            print("Error: Missing --output flag")    
-            return
-    else:
-        print(
-            "Error: Invalid Format"
-            "\nYour command should be in the following format: "
-            "\"uv run python -m agent_swebench --task-file task_path "
-            "--output output_path\""
-        )
-        return
-    task_path = args[1]
-    output_path = Path(args[3])
-    try:
-        with open(task_path, "r") as f:
-            task_data = f.read();
-            task = SWEBenchTaskInput.model_validate_json(task_data)
-    except FileNotFoundError:
-        print("Error: File Not Found")
-        return
-    except NotADirectoryError as e:
-        print(f"Error: {e}")
-        return
-    try:
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(output_path, 'w') as f:
-            run_model()
-    except FileExistsError:
-        print("Error: the directory you are trying to create has the " \
-              "same name as an existing file"
-        )
+    args = parse_args()
+
+    task_path = args.task_file
+    output_path = args.output
+    provider_url = args.provider_url
+    model_name = args.model_name
+
+    if not task_path.endswith(".json"):
+        print("Error: task is not a json file")
         return
 
+    try:
+        task_data = task_path.read_text()
+        task = SWEBenchTaskInput.model_validate_json(task_data)
+
+    except FileNotFoundError:
+        print(f"Error: Task file not found: {task_path}")
+        return
+
+    except IsADirectoryError:
+        print(f"Error: Expected a file, but got a directory: {task_path}")
+        return
+
+    except ValidationError as e:
+        print(f"Error: Invalid task JSON: {e}")
+        return
+
+    try:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with output_path.open("w") as f:
+            run_model(model_name, provider_url)
+
+    except FileExistsError:
+        print(
+            "Error: The directory you are trying to create "
+            "has the same name as an existing file."
+        )
+        return
 
 main()
