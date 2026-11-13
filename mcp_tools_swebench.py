@@ -1,9 +1,10 @@
 import glob
+import os
 
 def read_file(filepath, start_line, end_line):
     if start_line > end_line:
         return ""
-    if start_line < 0:
+    if start_line < 1:
         return ""
     try:
         with open(filepath, 'r') as f:
@@ -41,11 +42,38 @@ def edit_file(filepath, old_str, new_str):
 
 
 def list_files(directory, pattern):
-    return "\n".join(glob.glob(f"{directory}/{pattern}"))
+    return "\n".join(glob.glob(f"{directory}/**/{pattern}", recursive=True))
 
+
+def search_code(pattern, file_pattern):
+
+    files = list_files("/testbed", file_pattern).split("\n") # /testbed needs testing, for normal testing without a repo use . or any directory
+    occurences = []
+    for file in files:
+        try:
+            filepath = os.path.abspath(file)
+            with open(filepath, "r") as f:
+                lines = f.readlines()
+            for i, line in enumerate(lines):
+                if pattern in line:
+                    occurences.append(
+                        f"{filepath}:{i + 1} {line.rstrip()}"
+                    )
+        except (FileNotFoundError, PermissionError, IsADirectoryError):
+            continue
+
+    return "\n".join(occurences)
+
+
+
+
+
+# For testing purposes
 
 # print(read_file("agent_mbpp/__main__.py", 10, 20), end='')
 
 # print(edit_file("test.py", "# Should we", "#hhhhhhhhhh"), end="")
 
 # print(list_files("**", "*.py"))
+
+# print(search_code("def search_code(pattern, file_pattern)", "*.py"))
