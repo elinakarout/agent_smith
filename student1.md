@@ -122,8 +122,6 @@ The sandbox must employ an allowlist approach: only explicitly authorized module
 
 #### Step 2.5: Builtin Sanitization & Privilege Escalation Prevention
 
-# SKIPPED FOR NOW
-
 Untrusted code often attempts to escape sandboxes via built-in functions or Python object model introspection.
 - Construct a sanitized builtins dictionary for the execution namespace:
   - Remove inherently dangerous builtins: `eval`, `exec`, `compile`, `breakpoint`, `input`.
