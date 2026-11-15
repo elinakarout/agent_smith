@@ -8,3 +8,6 @@ __pycache__/
 
 # given
 moulinette/
+
+# secrets
+.env
