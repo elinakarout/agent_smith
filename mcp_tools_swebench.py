@@ -1,58 +1,20 @@
 import glob
 import os
+import ast
 import re
+from pathlib import Path
+import subprocess
+import shlex
 
-DEFINITION_PATTERNS = {
-    ".py": [
-        r"^\s*def\s+{name}\s*\(",
-        r"^\s*async\s+def\s+{name}\s*\(",
-        r"^\s*class\s+{name}\b",
-    ],
-
-    ".js": [
-        r"^\s*function\s+{name}\s*\(",
-        r"^\s*class\s+{name}\b",
-    ],
-
-    ".ts": [
-        r"^\s*function\s+{name}\s*\(",
-        r"^\s*class\s+{name}\b",
-        r"^\s*interface\s+{name}\b",
-    ],
-
-    ".java": [
-        r"^\s*(?:public|private|protected|static|final|\s)+"
-        r"[\w<>\[\],.?]+\s+{name}\s*\(",
-        r"^\s*(?:public|private|protected)?\s*class\s+{name}\b",
-    ],
-
-    ".go": [
-        r"^\s*func\s+(?:\([^)]*\)\s*)?{name}\s*\(",
-        r"^\s*type\s+{name}\s+struct\b",
-    ],
-
-    ".rs": [
-        r"^\s*(?:pub\s+)?fn\s+{name}\s*[<(]",
-        r"^\s*(?:pub\s+)?struct\s+{name}\b",
-        r"^\s*(?:pub\s+)?enum\s+{name}\b",
-    ],
-
-    ".php": [
-        r"^\s*(?:public|private|protected|static|\s)*"
-        r"function\s+{name}\s*\(",
-        r"^\s*class\s+{name}\b",
-    ],
-    ".c": [
-        r"^\s*[\w*]+\s+{name}\s*\([^;]*\)\s*\{?",
-    ],
-
-    ".cpp": [
-        r"^\s*[\w:*&<>, ]+\s+{name}\s*\([^;]*\)\s*(?:const\s*)?\{?",
-        r"^\s*class\s+{name}\b",
-        r"^\s*struct\s+{name}\b",
-    ],
+EXCLUDED_DIRS = {
+    ".git",
+    ".venv",
+    "__pycache__",
+    "node_modules",
+    ".tox",
+    "build",
+    "dist",
 }
-
 
 def read_file(filepath, start_line, end_line):
     if start_line > end_line:
@@ -128,9 +90,11 @@ def search_function_or_class_definition_in_code(name):
         if not filepath:
             continue
 
-        extension = os.path.splitext(filepath)[1].lower()
-
-        patterns = DEFINITION_PATTERNS.get(extension, [])
+        patterns = [
+            r"^\s*def\s+{name}\s*\(",
+            r"^\s*async\s+def\s+{name}\s*\(",
+            r"^\s*class\s+{name}\b",
+        ]
 
         if not patterns:
             continue
@@ -155,6 +119,79 @@ def search_function_or_class_definition_in_code(name):
         return f"{name} not found"
     return "\n".join(results)
 
+def find_references(name, filepath, line):
+    filepath = Path(filepath).resolve()
+
+    if not filepath.is_file():
+        return f"Error: File not found: {filepath}"
+
+    try:
+        source = filepath.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(filepath))
+    except (OSError, SyntaxError, UnicodeError) as exc:
+        return f"Error parsing {filepath}: {exc}"
+
+    # Verify that the requested definition exists.
+    definition = None
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef,
+                             ast.AsyncFunctionDef)):
+            if node.name == name and node.lineno == line:
+                definition = node
+                break
+
+    if definition is None:
+        return f"Error: Definition '{name}' not found at line {line}"
+
+    root = Path(__file__).resolve().parent
+
+    # Search the project (adjust root to your repository root).
+    results = []
+
+    for py_file in root.rglob("*.py"):
+        if EXCLUDED_DIRS.intersection(py_file.parts):
+            continue
+        try:
+            code = py_file.read_text(encoding="utf-8")
+            parsed = ast.parse(code, filename=str(py_file))
+        except (OSError, SyntaxError, UnicodeError):
+            continue
+
+        for node in ast.walk(parsed):
+            if isinstance(node, ast.Name) and node.id == name:
+                results.append(
+                    f"{py_file}:{node.lineno} "
+                    f"{code.splitlines()[node.lineno - 1].strip()}"
+                )
+
+            elif isinstance(node, ast.Attribute) and node.attr == name:
+                results.append(
+                    f"{py_file}:{node.lineno} "
+                    f"{code.splitlines()[node.lineno - 1].strip()}"
+                )
+
+    for py_file in root.rglob("*.py"):
+        if EXCLUDED_DIRS.intersection(py_file.parts):
+            continue
+
+        print(py_file)
+    return "\n".join(set(results))
+
+def run_command(command, workdir):
+    result = subprocess.run(
+        shlex.split(command),
+        capture_output=True,
+        text=True,
+        cwd=workdir
+    )
+
+    return result.stdout
+
+
+def get_patch():
+    return run_command("git diff HEAD", "/testbed") # needs testing
+
 # For testing purposes
 
 # print(read_file("agent_mbpp/__main__.py", 10, 20), end='')
@@ -166,3 +203,7 @@ def search_function_or_class_definition_in_code(name):
 # print(search_code("def search_code(pattern, file_pattern)", "*.py"))
 
 # print(search_function_or_class_definition_in_code("DEFINITION_PATTERNS"))
+
+# print(find_references("ExecutionResult", "/sgoinfre/hdaoun/agent_smith/sandbox/schemas.py", 40))
+
+# run_command("cat schemas.py", "/sgoinfre/hdaoun/agent_smith/sandbox")
