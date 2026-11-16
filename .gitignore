@@ -1,4 +1,3 @@
 moulinette/
-.venv/
-uv.lock
+ .venv/
 .env
