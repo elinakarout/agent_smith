@@ -15,6 +15,8 @@ EXCLUDED_DIRS = {
     "build",
     "dist",
 }
+container = None
+eval_script = None
 
 def read_file(filepath, start_line, end_line):
     if start_line > end_line:
@@ -189,7 +191,34 @@ def run_command(command, workdir):
     return result.stdout
 
 
-# def run_tests():
+def configure_swebench(docker_container, task_eval_script):
+    global container, eval_script
+
+    container = docker_container
+    eval_script = task_eval_script
+
+
+def run_tests():
+    if container is None or eval_script is None:
+        return "Error: SWE-bench environment not initialized"
+
+    try:
+        result = container.exec_run(
+            ["bash", "-lc", eval_script],
+            workdir="/testbed",
+            demux=True,
+        )
+
+        stdout, stderr = result.output
+
+        return {
+            "exit_code": result.exit_code,
+            "stdout": stdout.decode(errors="replace") if stdout else "",
+            "stderr": stderr.decode(errors="replace") if stderr else "",
+        }
+
+    except Exception as e:
+        return f"Error executing tests: {e}"
 
 
 def get_patch():
