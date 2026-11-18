@@ -26,11 +26,11 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
-    "--provider-url",
-    type=str,
-    default=None,
-    help="LLM provider API URL (optional)."
-)
+        "--provider-url",
+        type=str,
+        default=None,
+        help="LLM provider API URL (optional)."
+    )
 
     parser.add_argument(
         "--model-name",
