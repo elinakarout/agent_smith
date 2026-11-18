@@ -189,6 +189,9 @@ def run_command(command, workdir):
     return result.stdout
 
 
+# def run_tests():
+
+
 def get_patch():
     return run_command("git diff HEAD", "/testbed") # needs testing
 
