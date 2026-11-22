@@ -1,14 +1,14 @@
 import ast
 import builtins
-from permissions import make_guarded_open
-from final_answer import final_answer
-from security_globals import DANGEROUS_ATTRIBUTES, EXECUTION_BUILTINS
-from schemas import SandboxConfig, ExecutionResult, ExecutionStatus
+from .permissions import make_guarded_open
+from .final_answer import final_answer
+from .security_globals import DANGEROUS_ATTRIBUTES, EXECUTION_BUILTINS
+from .schemas import SandboxConfig, ExecutionResult, ExecutionStatus
 
 
 def build_execution_environment(config: SandboxConfig) -> dict:
     original_import = builtins.__import__
-    
+
     def restricted_import(name, globals=None, locals=None, fromlist=(), level=0):
         if name not in config.authorized_imports:
             raise ImportError(f"Unauthorized import: {name}")

@@ -1,5 +1,5 @@
 import json
-from schemas import SandboxConfig
+from .schemas import SandboxConfig
 
 
 def read_config(file_path: str) -> SandboxConfig:

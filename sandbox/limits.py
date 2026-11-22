@@ -1,5 +1,5 @@
 import resource
-from schemas import SandboxConfig
+from .schemas import SandboxConfig
 
 
 def timeout_handler(signum, frame):

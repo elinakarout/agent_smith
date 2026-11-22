@@ -1,13 +1,14 @@
 import io
 import signal
 import multiprocessing as mp
-from network_guard import block_network
-from final_answer import FinalAnswerSignal
+from .network_guard import block_network
+from .tool_wrappers import build_tool_namespace 
+from .final_answer import FinalAnswerSignal
 from multiprocessing.connection import Connection
-from limits import timeout_handler, set_memory_limit
+from .limits import timeout_handler, set_memory_limit
 from contextlib import redirect_stdout, redirect_stderr
-from security import validate_code, build_execution_environment
-from schemas import SandboxConfig, ExecutionResult, ExecutionStatus
+from .security import validate_code, build_execution_environment
+from .schemas import SandboxConfig, ExecutionResult, ExecutionStatus
 
 
 def run_code(code: str, execution_globals: dict) -> tuple:
@@ -44,11 +45,14 @@ def run_code(code: str, execution_globals: dict) -> tuple:
 def worker(
     connection: Connection,
     code: str,
-    config: SandboxConfig
+    config: SandboxConfig,
+    tools: list
 ) -> None:
     control_signal = None
     block_network()
     execution_globals = build_execution_environment(config)
+    tool_namespace = build_tool_namespace(tools, connection)
+    execution_globals.update(tool_namespace)
     signal.signal(signal.SIGALRM, timeout_handler)
     signal.alarm(config.max_execution_time_seconds)
     set_memory_limit(config)
@@ -90,28 +94,40 @@ class SandboxExecutor():
     def __init__(self, config: SandboxConfig):
         self.config = config
     
-    def execute_code(self, code: str):
+    async def execute_code(self, code: str, session, tools):
         result = validate_code(self.config, code)
         if result:
             return result
         parent, child = mp.Pipe()
         process = mp.Process(
             target=worker,
-            args=(child, code, self.config)
+            args=(child, code, self.config, tools)
         )
         process.start()
         child.close()
-        process.join()
-        if process.is_alive():
-            process.kill()
-            process.join()
-            parent.close()
-            return ExecutionResult(
-                status_code=ExecutionStatus.TIMEOUT,
-                error_message="Execution exceeded the maximum allowed time."
-            )
-        result = parent.recv()
+
+        while True:
+            message = parent.recv()
+            if isinstance(message, ExecutionResult):
+                result = message
+                break
+            if message["type"] == "mcp_tool_call":
+                tool_name = message["name"]
+                arguments = message["arguments"]
+                try:
+                    result = await session.call_tool(tool_name, arguments)
+                    parent.send({
+                        "type": "mcp_tool_result",
+                        "result": result.model_dump(mode="json")
+                    })
+                except Exception as e:
+                    parent.send({
+                        "type": "mcp_tool_error",
+                        "error": str(e)
+                    })
+    
         parent.close()
+        process.join()
         if result == "keyboard_interrupt":
             raise KeyboardInterrupt()
 
@@ -119,5 +135,3 @@ class SandboxExecutor():
             raise SystemExit(result[1])
 
         return result
-
-
