@@ -3,6 +3,7 @@ import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 from dotenv import load_dotenv
+from models.models import StepMetrics
 from openai import (
     OpenAI,
     RateLimitError,
