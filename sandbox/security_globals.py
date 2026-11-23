@@ -30,6 +30,7 @@ EXECUTION_BUILTINS = {
         "ImportError": builtins.ImportError,
         "IndexError": builtins.IndexError,
         "KeyError": builtins.KeyError,
+        "MemoryError": builtins.MemoryError,
         "NameError": builtins.NameError,
         "RuntimeError": builtins.RuntimeError,
         "TypeError": builtins.TypeError,
@@ -49,6 +50,7 @@ EXECUTION_BUILTINS = {
         "classmethod": builtins.classmethod,
         "complex": builtins.complex,
         "dict": builtins.dict,
+        "dir": builtins.dir,
         "divmod": builtins.divmod,
         "enumerate": builtins.enumerate,
         "filter": builtins.filter,
@@ -86,5 +88,6 @@ EXECUTION_BUILTINS = {
         "sum": builtins.sum,
         "super": builtins.super,
         "tuple": builtins.tuple,
+        "type": builtins.type,
         "zip": builtins.zip,
     }

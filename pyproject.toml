@@ -22,4 +22,4 @@ package = true
 py-modules = ["sandbox"]
 
 [project.scripts]
-sandbox = "sandbox.cli:main"
+sandbox = "sandbox.cli:run"

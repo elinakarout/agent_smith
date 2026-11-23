@@ -1,4 +1,15 @@
-def generate_tool_manual(tools):
+from typing import Any, Sequence
+
+
+def generate_tool_manual(tools: Sequence[Any]) -> str:
+    """Generate human-readable documentation for available MCP tools.
+
+    Args:
+        tools: Collection of MCP Tool objects containing schemas and descriptions.
+
+    Returns:
+        str: Formatted documentation manual string describing the tools and parameters.
+    """
     manual = ["AVAILABLE MCP TOOLS"]
 
     for tool in tools:
