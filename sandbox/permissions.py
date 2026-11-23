@@ -1,8 +1,40 @@
-import builtins
 import os
+import builtins
+from typing import Any, Callable
+from .schemas import SandboxConfig
 
-def make_guarded_open(config):
-    def guarded_open(file, mode="r", *args, **kwargs):
+
+def make_guarded_open(config: SandboxConfig) -> Callable[..., Any]:
+    """Create a guarded version of the built-in open function.
+
+    Restricts file opening to specified allowed directories and blocks custom openers.
+
+    Args:
+        config: Sandbox configuration containing allowed directories.
+
+    Returns:
+        Callable[..., Any]: A guarded open function that enforces path restrictions.
+    """
+    def guarded_open(
+        file: str | bytes | os.PathLike[Any],
+        mode: str = "r",
+        *args: Any,
+        **kwargs: Any
+    ) -> Any:
+        """Open a file after validating that its path resides within allowed directories.
+
+        Args:
+            file: Path-like object or descriptor of the file to open.
+            mode: Mode in which the file is opened. Defaults to 'r'.
+            *args: Additional positional arguments forwarded to builtins.open.
+            **kwargs: Additional keyword arguments forwarded to builtins.open.
+
+        Returns:
+            Any: The opened file object.
+
+        Raises:
+            PermissionError: If the path is outside allowed directories or a custom opener is passed.
+        """
         requested_path = os.fspath(file)
         resolved_path = os.path.realpath(requested_path)
 

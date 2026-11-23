@@ -44,3 +44,5 @@ class ExecutionResult(BaseModel):
     result: Optional[Any] = None
     final_answer: Optional[Any] = None
     error_message: Optional[str] = None
+    user_state: Optional[dict] = None
+    user_modules: Optional[dict] = None

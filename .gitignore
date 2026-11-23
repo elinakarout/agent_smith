@@ -12,3 +12,4 @@ moulinette/
 # secrets
 .env
 student1.md
+test_*.py
