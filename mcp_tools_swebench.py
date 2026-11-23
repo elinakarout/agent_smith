@@ -18,127 +18,269 @@ EXCLUDED_DIRS = {
 container = None
 eval_script = None
 
-def read_file(filepath, start_line, end_line):
-    if start_line > end_line:
-        return ""
-    if start_line < 1:
-        return ""
+
+ALLOWED_DIRECTORIES = [
+    Path("/testbed").resolve(),
+    Path("/tmp/agent").resolve(),
+]
+
+
+def check_path_permission(filepath, must_exist=False):
+    """
+    Check whether a path is inside an authorized directory.
+
+    Resolves symlinks and prevents path traversal.
+    """
+
     try:
-        with open(filepath, 'r') as f:
+        path = Path(filepath).resolve(strict=must_exist)
+
+        for allowed_dir in ALLOWED_DIRECTORIES:
+            try:
+                path.relative_to(allowed_dir)
+                return path
+            except ValueError:
+                continue
+
+        raise PermissionError(
+            f"Access denied: {filepath} is outside allowed directories"
+        )
+
+    except (OSError, RuntimeError) as exc:
+        raise PermissionError(f"Invalid or inaccessible path: {exc}")
+
+
+def read_file(filepath, start_line, end_line):
+    if start_line > end_line or start_line < 1:
+        return ""
+
+    try:
+        filepath = check_path_permission(filepath, must_exist=True)
+
+        with open(filepath, "r", encoding="utf-8") as f:
             lines = f.readlines()
-            result=""
-            for i in range(start_line - 1, min(len(lines), end_line)):
-                result = result + (f"{i + 1}:" + lines[i])
+
+        result = ""
+
+        for i in range(start_line - 1, min(len(lines), end_line)):
+            result += f"{i + 1}: {lines[i]}"
+
         return result
+
+    except PermissionError as e:
+        return f"Error: {e}"
     except FileNotFoundError:
         return "File Not Found"
+    except (OSError, UnicodeError) as e:
+        return f"Error reading file: {e}"
 
 
 def edit_file(filepath, old_str, new_str):
     if old_str == "":
-        return "Error: String to replace is \"\"\n"
+        return 'Error: String to replace is ""\n'
+
     if old_str == new_str:
         return "Error: String and Replacement Are Equal\n"
+
     try:
-        with open(filepath, 'r') as f:
-            content = f.read()
-            occurences = content.count(old_str)
-            if occurences > 1:
-                return f"Error: {occurences} Occurences Found\n"
-            if occurences == 0:
-                return "Error: Couldn't Find String\n"
-        with open(filepath, 'w') as f:
-            content = content.replace(old_str, new_str)
-            f.write(content)
-            return "String Replaced Successfully\n"
-        
+        filepath = check_path_permission(filepath, must_exist=True)
+
+        if not filepath.is_file():
+            return "Error: Not a regular file\n"
+
+        content = filepath.read_text(encoding="utf-8")
+
+        occurrences = content.count(old_str)
+
+        if occurrences > 1:
+            return f"Error: {occurrences} Occurrences Found\n"
+
+        if occurrences == 0:
+            return "Error: Couldn't Find String\n"
+
+        filepath.write_text(
+            content.replace(old_str, new_str),
+            encoding="utf-8"
+        )
+
+        return "String Replaced Successfully\n"
+
+    except PermissionError as e:
+        return f"Error: {e}\n"
     except FileNotFoundError:
         return "Error: File Not Found\n"
-    except PermissionError:
-        return "Error: Permission Denied\n"
+    except (OSError, UnicodeError) as e:
+        return f"Error: {e}\n"
 
 
 def list_files(directory, pattern):
-    return "\n".join(glob.glob(f"{directory}/**/{pattern}", recursive=True))
+    try:
+        directory = check_path_permission(directory, must_exist=True)
 
+        if not directory.is_dir():
+            return "Error: Not a directory"
+
+        results = []
+
+        for filepath in directory.rglob(pattern):
+            try:
+                filepath = check_path_permission(
+                    filepath,
+                    must_exist=True
+                )
+
+                if EXCLUDED_DIRS.intersection(filepath.parts):
+                    continue
+
+                if filepath.is_file():
+                    results.append(str(filepath))
+
+            except (PermissionError, OSError):
+                continue
+
+        return "\n".join(results)
+
+    except PermissionError as e:
+        return f"Error: {e}"
+    except OSError as e:
+        return f"Error: {e}"
 
 def search_code(pattern, file_pattern):
+    try:
+        root = check_path_permission("/testbed", must_exist=True)
 
-    files = list_files("/testbed", file_pattern).split("\n") # /testbed needs testing, for normal testing without a repo use . or any directory
-    occurences = []
-    for file in files:
-        try:
-            filepath = os.path.abspath(file)
-            with open(filepath, "r") as f:
-                lines = f.readlines()
-            for i, line in enumerate(lines):
-                if pattern in line:
-                    occurences.append(
-                        f"{filepath}:{i + 1} {line.rstrip()}"
-                    )
-        except (FileNotFoundError, PermissionError, IsADirectoryError):
-            continue
+        if not root.is_dir():
+            return "Error: Search root is not a directory"
 
-    return "\n".join(occurences)
+        files = list_files(str(root), file_pattern)
+
+        if files.startswith("Error:"):
+            return files
+
+        occurrences = []
+
+        for filepath in files.splitlines():
+            if not filepath:
+                continue
+
+            try:
+                filepath = check_path_permission(
+                    filepath,
+                    must_exist=True
+                )
+
+                if not filepath.is_file():
+                    continue
+
+                if EXCLUDED_DIRS.intersection(filepath.parts):
+                    continue
+
+                with filepath.open("r", encoding="utf-8") as f:
+                    for line_number, line in enumerate(f, start=1):
+                        if pattern in line:
+                            occurrences.append(
+                                f"{filepath}:{line_number} {line.rstrip()}"
+                            )
+
+            except (PermissionError, OSError, UnicodeError):
+                continue
+
+        return "\n".join(occurrences)
+
+    except PermissionError as e:
+        return f"Error: {e}"
+    except OSError as e:
+        return f"Error searching code: {e}"
 
 def search_function_or_class_definition_in_code(name):
     results = []
 
-    files = list_files("/testbed", "*").splitlines()  # /testbed needs testing, for normal testing without a repo use . or any directory
+    try:
+        root = check_path_permission("/testbed", must_exist=True)
 
-    escaped_name = re.escape(name)
+        if not root.is_dir():
+            return "Error: Search root is not a directory"
 
-    for filepath in files:
-        if not filepath:
-            continue
+        files = list_files(str(root), "*.py")
+
+        if files.startswith("Error:"):
+            return files
+
+        escaped_name = re.escape(name)
 
         patterns = [
-            r"^\s*def\s+{name}\s*\(",
-            r"^\s*async\s+def\s+{name}\s*\(",
-            r"^\s*class\s+{name}\b",
+            rf"^\s*def\s+{escaped_name}\s*\(",
+            rf"^\s*async\s+def\s+{escaped_name}\s*\(",
+            rf"^\s*class\s+{escaped_name}\b",
         ]
 
-        if not patterns:
-            continue
+        for filepath in files.splitlines():
+            if not filepath:
+                continue
 
-        try:
-            with open(filepath, "r", encoding="utf-8") as f:
-                for line_number, line in enumerate(f, start=1):
-                    for pattern in patterns:
-                        regex = pattern.format(name=escaped_name)
+            try:
+                filepath = check_path_permission(
+                    filepath,
+                    must_exist=True
+                )
 
-                        if re.search(regex, line):
-                            results.append(
-                                f"{os.path.abspath(filepath)}:"
-                                f"{line_number} {line.rstrip()}"
-                            )
-                            break
+                if not filepath.is_file():
+                    continue
 
-        except (OSError, UnicodeError):
-            continue
+                if EXCLUDED_DIRS.intersection(filepath.parts):
+                    continue
 
-    if not results:
-        return f"{name} not found"
-    return "\n".join(results)
+                with filepath.open("r", encoding="utf-8") as f:
+                    for line_number, line in enumerate(f, start=1):
+                        for pattern in patterns:
+                            if re.search(pattern, line):
+                                results.append(
+                                    f"{filepath}:{line_number} "
+                                    f"{line.rstrip()}"
+                                )
+                                break
+
+            except (PermissionError, OSError, UnicodeError):
+                continue
+
+        if not results:
+            return f"{name} not found"
+
+        return "\n".join(results)
+
+    except PermissionError as e:
+        return f"Error: {e}"
+    except OSError as e:
+        return f"Error searching definitions: {e}"
 
 def find_references(name, filepath, line):
-    filepath = Path(filepath).resolve()
-
-    if not filepath.is_file():
-        return f"Error: File not found: {filepath}"
-
     try:
+        filepath = check_path_permission(
+            filepath,
+            must_exist=True
+        )
+
+        if not filepath.is_file():
+            return f"Error: Not a file: {filepath}"
+
+        if not isinstance(line, int) or line < 1:
+            return "Error: Invalid line number"
+
         source = filepath.read_text(encoding="utf-8")
         tree = ast.parse(source, filename=str(filepath))
-    except (OSError, SyntaxError, UnicodeError) as exc:
-        return f"Error parsing {filepath}: {exc}"
 
-    # Verify that the requested definition exists.
+    except PermissionError as e:
+        return f"Error: {e}"
+    except (OSError, SyntaxError, UnicodeError) as e:
+        return f"Error parsing {filepath}: {e}"
+
     definition = None
 
     for node in ast.walk(tree):
-        if isinstance(node, (ast.ClassDef, ast.FunctionDef,
-                             ast.AsyncFunctionDef)):
+        if isinstance(
+            node,
+            (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+        ):
             if node.name == name and node.lineno == line:
                 definition = node
                 break
@@ -146,50 +288,87 @@ def find_references(name, filepath, line):
     if definition is None:
         return f"Error: Definition '{name}' not found at line {line}"
 
-    root = Path(__file__).resolve().parent
+    try:
+        root = check_path_permission("/testbed", must_exist=True)
 
-    # Search the project (adjust root to your repository root).
-    results = []
+        if not root.is_dir():
+            return "Error: Search root is not a directory"
+
+    except PermissionError as e:
+        return f"Error: {e}"
+
+    results = set()
 
     for py_file in root.rglob("*.py"):
         if EXCLUDED_DIRS.intersection(py_file.parts):
             continue
+
         try:
+            py_file = check_path_permission(
+                py_file,
+                must_exist=True
+            )
+
+            if not py_file.is_file():
+                continue
+
             code = py_file.read_text(encoding="utf-8")
             parsed = ast.parse(code, filename=str(py_file))
-        except (OSError, SyntaxError, UnicodeError):
+            lines = code.splitlines()
+
+        except (PermissionError, OSError, SyntaxError, UnicodeError):
             continue
 
         for node in ast.walk(parsed):
+
             if isinstance(node, ast.Name) and node.id == name:
-                results.append(
+                results.add(
                     f"{py_file}:{node.lineno} "
-                    f"{code.splitlines()[node.lineno - 1].strip()}"
+                    f"{lines[node.lineno - 1].strip()}"
                 )
 
             elif isinstance(node, ast.Attribute) and node.attr == name:
-                results.append(
+                results.add(
                     f"{py_file}:{node.lineno} "
-                    f"{code.splitlines()[node.lineno - 1].strip()}"
+                    f"{lines[node.lineno - 1].strip()}"
                 )
 
-    for py_file in root.rglob("*.py"):
-        if EXCLUDED_DIRS.intersection(py_file.parts):
-            continue
-
-        print(py_file)
-    return "\n".join(set(results))
+    return "\n".join(sorted(results))
 
 def run_command(command, workdir):
-    result = subprocess.run(
-        shlex.split(command),
-        capture_output=True,
-        text=True,
-        cwd=workdir
-    )
+    try:
+        workdir = check_path_permission(
+            workdir,
+            must_exist=True
+        )
 
-    return result.stdout
+        if not workdir.is_dir():
+            return {
+                "error": "Working directory is not a directory"
+            }
 
+        result = subprocess.run(
+            shlex.split(command),
+            capture_output=True,
+            text=True,
+            cwd=str(workdir),
+            timeout=120
+        )
+
+        return {
+            "exit_code": result.returncode,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+        }
+
+    except PermissionError as e:
+        return {"error": str(e)}
+
+    except subprocess.TimeoutExpired:
+        return {"error": "Command execution timed out"}
+
+    except (OSError, subprocess.SubprocessError) as e:
+        return {"error": f"Error executing command: {e}"}
 
 def configure_swebench(docker_container, task_eval_script):
     global container, eval_script
@@ -222,7 +401,42 @@ def run_tests():
 
 
 def get_patch():
-    return run_command("git diff HEAD", "/testbed") # needs testing
+    try:
+        repo_path = check_path_permission(
+            "/testbed",
+            must_exist=True
+        )
+
+        if not repo_path.is_dir():
+            return "Error: Repository directory not found"
+
+        result = subprocess.run(
+            [
+                "git",
+                "-c",
+                "core.fileMode=false",
+                "diff",
+            ],
+            capture_output=True,
+            text=True,
+            cwd=str(repo_path),
+            timeout=30
+        )
+
+        if result.returncode != 0:
+            return f"Error getting patch:\n{result.stderr}"
+
+        return result.stdout
+
+    except PermissionError as e:
+        return f"Error: {e}"
+
+    except subprocess.TimeoutExpired:
+        return "Error: Git diff timed out"
+
+    except (OSError, subprocess.SubprocessError) as e:
+        return f"Error getting patch: {e}"
+    
 
 # For testing purposes
 
@@ -230,7 +444,7 @@ def get_patch():
 
 # print(edit_file("test.py", "# Should we", "#hhhhhhhhhh"), end="")
 
-# print(list_files("**", "*.py"))
+# print(list_files("/testbed", "*.py"))
 
 # print(search_code("def search_code(pattern, file_pattern)", "*.py"))
 
@@ -238,4 +452,4 @@ def get_patch():
 
 # print(find_references("ExecutionResult", "/sgoinfre/hdaoun/agent_smith/sandbox/schemas.py", 40))
 
-# run_command("cat schemas.py", "/sgoinfre/hdaoun/agent_smith/sandbox")
+run_command("cat schemas.py", "/sgoinfre/hdaoun/agent_smith/sandbox")
