@@ -1,12 +1,14 @@
 import re
 from pathlib import PurePosixPath
 from docker_manager.manager import DockerManager
-
+from mcp.server.mcpserver import MCPServer
 
 docker_manager = None
 eval_script = None
 
 CONTAINER_TESTBED = "/testbed"
+
+mcp = MCPServer("MCP Server")
 
 
 def configure_swebench(image, task_eval_script, testbed_path=None):
@@ -130,7 +132,7 @@ def _error_result(error):
     return f"Error: {error}"
 
 
-
+@mcp.tool()
 def read_file(filepath, start_line, end_line):
     if start_line < 1 or end_line < start_line:
         return ""
@@ -153,7 +155,7 @@ def read_file(filepath, start_line, end_line):
     except Exception as e:
         return f"Error reading file: {e}"
 
-
+@mcp.tool()
 def edit_file(filepath, old_str, new_str):
     try:
         filepath = validate_container_path(filepath, must_exist=True)
@@ -179,7 +181,7 @@ def edit_file(filepath, old_str, new_str):
     except Exception as e:
         return f"Error editing file: {e}"
 
-
+@mcp.tool()
 def list_files(directory, pattern):
     try:
         directory = validate_container_path(
@@ -211,7 +213,7 @@ def list_files(directory, pattern):
         return f"Error listing files: {e}"
 
 
-
+@mcp.tool()
 def search_code(pattern, file_pattern):
     try:
         result = docker_exec([
@@ -239,7 +241,7 @@ def search_code(pattern, file_pattern):
     except Exception as e:
         return f"Error searching code: {e}"
 
-
+@mcp.tool()
 def search_function_or_class_definition_in_code(name):
     try:
         escaped = re.escape(name)
@@ -274,7 +276,7 @@ def search_function_or_class_definition_in_code(name):
     except Exception as e:
         return f"Error searching definitions: {e}"
 
-
+@mcp.tool()
 def find_references(name, filepath, line):
     try:
         filepath = validate_container_path(filepath, must_exist=True)
@@ -291,7 +293,7 @@ def find_references(name, filepath, line):
     except Exception as e:
         return f"Error finding references: {e}"
 
-
+@mcp.tool()
 def run_command(command, workdir):
     try:
         workdir = validate_container_path(
@@ -311,7 +313,7 @@ def run_command(command, workdir):
     except Exception as e:
         return {"error": f"Error executing command: {e}"}
 
-
+@mcp.tool()
 def run_tests():
     if not eval_script:
         return {"error": "Evaluation script not configured"}
@@ -326,7 +328,7 @@ def run_tests():
     except Exception as e:
         return {"error": f"Error executing tests: {e}"}
 
-
+@mcp.tool()
 def get_patch():
     try:
         result = docker_exec([
