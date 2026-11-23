@@ -1,455 +1,365 @@
-import glob
-import os
-import ast
 import re
-from pathlib import Path
-import subprocess
-import shlex
+from pathlib import PurePosixPath
+from docker_manager.manager import DockerManager
 
-EXCLUDED_DIRS = {
-    ".git",
-    ".venv",
-    "__pycache__",
-    "node_modules",
-    ".tox",
-    "build",
-    "dist",
-}
-container = None
+
+docker_manager = None
 eval_script = None
 
-
-ALLOWED_DIRECTORIES = [
-    Path("/testbed").resolve(),
-    Path("/tmp/agent").resolve(),
-]
+CONTAINER_TESTBED = "/testbed"
 
 
-def check_path_permission(filepath, must_exist=False):
+def configure_swebench(image, task_eval_script, testbed_path=None):
+    global docker_manager, eval_script
+
+    if not testbed_path:
+        raise ValueError("testbed_path is required")
+
+    docker_manager = DockerManager(
+        image=image,
+        working_dir="/testbed",
+    )
+
+    eval_script = task_eval_script
+
+    docker_manager.pull_image()
+    docker_manager.start()
+
+
+def stop_swebench():
+    global docker_manager
+
+    if docker_manager is not None:
+        docker_manager.stop()
+        docker_manager = None
+
+
+def _ensure_container():
+    if docker_manager is None or docker_manager.container is None:
+        raise RuntimeError("Docker environment not initialized")
+
+
+def validate_container_path(filepath, must_exist=False):
     """
-    Check whether a path is inside an authorized directory.
+    Validate a path inside /testbed.
 
-    Resolves symlinks and prevents path traversal.
+    Paths are interpreted relative to /testbed unless absolute.
+    Symlink resolution is also checked inside Docker.
     """
 
-    try:
-        path = Path(filepath).resolve(strict=must_exist)
+    if not isinstance(filepath, str) or not filepath:
+        raise ValueError("Invalid filepath")
 
-        for allowed_dir in ALLOWED_DIRECTORIES:
-            try:
-                path.relative_to(allowed_dir)
-                return path
-            except ValueError:
-                continue
+    path = PurePosixPath(filepath)
 
-        raise PermissionError(
-            f"Access denied: {filepath} is outside allowed directories"
+    if ".." in path.parts:
+        raise PermissionError("Path traversal detected")
+
+    if path.is_absolute():
+        candidate = path
+    else:
+        candidate = PurePosixPath(CONTAINER_TESTBED) / path
+
+    normalized = str(candidate)
+
+    if not candidate.is_relative_to(PurePosixPath(CONTAINER_TESTBED)):
+        raise PermissionError("Access denied")
+
+    _ensure_container()
+
+    result = docker_manager.container.exec_run(
+        [
+            "python3",
+            "-c",
+            (
+                "import os,sys;"
+                "p=os.path.realpath(sys.argv[1]);"
+                "root=os.path.realpath('/testbed');"
+                "sys.exit(0 if os.path.commonpath([p,root]) == root else 1);"
+            ),
+            normalized,
+        ],
+        workdir="/testbed",
+    )
+
+    if result.exit_code != 0:
+        raise PermissionError("Path escapes the repository")
+
+    if must_exist:
+        result = docker_manager.container.exec_run(
+            ["test", "-e", normalized],
+            workdir="/testbed",
         )
 
-    except (OSError, RuntimeError) as exc:
-        raise PermissionError(f"Invalid or inaccessible path: {exc}")
+        if result.exit_code != 0:
+            raise FileNotFoundError(normalized)
+
+    return normalized
+
+
+def docker_exec(command, workdir="/testbed", timeout=120):
+    """
+    Execute a command inside the Docker container.
+
+    command must be an argument list, not a shell string.
+    """
+
+    _ensure_container()
+
+    workdir = validate_container_path(workdir, must_exist=True)
+
+    if not isinstance(command, list) or not command:
+        raise ValueError("Invalid command")
+
+    result = docker_manager.container.exec_run(
+        ["timeout", "--signal=TERM", f"{timeout}s", *command],
+        workdir=workdir,
+        demux=True,
+    )
+
+    stdout, stderr = result.output
+
+    return {
+        "exit_code": result.exit_code,
+        "stdout": stdout.decode(errors="replace") if stdout else "",
+        "stderr": stderr.decode(errors="replace") if stderr else "",
+    }
+
+
+def _error_result(error):
+    return f"Error: {error}"
+
 
 
 def read_file(filepath, start_line, end_line):
-    if start_line > end_line or start_line < 1:
+    if start_line < 1 or end_line < start_line:
         return ""
 
     try:
-        filepath = check_path_permission(filepath, must_exist=True)
+        filepath = validate_container_path(filepath, must_exist=True)
 
-        with open(filepath, "r", encoding="utf-8") as f:
-            lines = f.readlines()
+        result = docker_exec([
+            "awk",
+            f'NR >= {int(start_line)} && NR <= {int(end_line)} '
+            '{printf "%d: %s\\n", NR, $0}',
+            filepath,
+        ])
 
-        result = ""
+        if result["exit_code"] != 0:
+            return result["stderr"]
 
-        for i in range(start_line - 1, min(len(lines), end_line)):
-            result += f"{i + 1}: {lines[i]}"
+        return result["stdout"]
 
-        return result
-
-    except PermissionError as e:
-        return f"Error: {e}"
-    except FileNotFoundError:
-        return "File Not Found"
-    except (OSError, UnicodeError) as e:
+    except Exception as e:
         return f"Error reading file: {e}"
 
 
 def edit_file(filepath, old_str, new_str):
-    if old_str == "":
-        return 'Error: String to replace is ""\n'
-
-    if old_str == new_str:
-        return "Error: String and Replacement Are Equal\n"
-
     try:
-        filepath = check_path_permission(filepath, must_exist=True)
+        filepath = validate_container_path(filepath, must_exist=True)
 
-        if not filepath.is_file():
-            return "Error: Not a regular file\n"
+        result = docker_exec([
+            "perl",
+            "-0777",
+            "-i",
+            "-e",
+            """
+            BEGIN {
+                $old = shift @ARGV;
+                $new = shift @ARGV;
+            }
+            """,
+            old_str,
+            new_str,
+            filepath,
+        ])
 
-        content = filepath.read_text(encoding="utf-8")
+        return result["stdout"] or result["stderr"]
 
-        occurrences = content.count(old_str)
-
-        if occurrences > 1:
-            return f"Error: {occurrences} Occurrences Found\n"
-
-        if occurrences == 0:
-            return "Error: Couldn't Find String\n"
-
-        filepath.write_text(
-            content.replace(old_str, new_str),
-            encoding="utf-8"
-        )
-
-        return "String Replaced Successfully\n"
-
-    except PermissionError as e:
-        return f"Error: {e}\n"
-    except FileNotFoundError:
-        return "Error: File Not Found\n"
-    except (OSError, UnicodeError) as e:
-        return f"Error: {e}\n"
+    except Exception as e:
+        return f"Error editing file: {e}"
 
 
 def list_files(directory, pattern):
     try:
-        directory = check_path_permission(directory, must_exist=True)
+        directory = validate_container_path(
+            directory,
+            must_exist=True,
+        )
 
-        if not directory.is_dir():
-            return "Error: Not a directory"
+        result = docker_exec([
+            "find",
+            directory,
+            "-type", "f",
+            "-name", pattern,
+            "-not", "-path", "*/.git/*",
+            "-not", "-path", "*/.venv/*",
+            "-not", "-path", "*/__pycache__/*",
+            "-not", "-path", "*/node_modules/*",
+            "-not", "-path", "*/.tox/*",
+            "-not", "-path", "*/build/*",
+            "-not", "-path", "*/dist/*",
+        ])
 
-        results = []
+        return (
+            result["stdout"]
+            if result["exit_code"] == 0
+            else result["stderr"]
+        )
 
-        for filepath in directory.rglob(pattern):
-            try:
-                filepath = check_path_permission(
-                    filepath,
-                    must_exist=True
-                )
+    except Exception as e:
+        return f"Error listing files: {e}"
 
-                if EXCLUDED_DIRS.intersection(filepath.parts):
-                    continue
 
-                if filepath.is_file():
-                    results.append(str(filepath))
-
-            except (PermissionError, OSError):
-                continue
-
-        return "\n".join(results)
-
-    except PermissionError as e:
-        return f"Error: {e}"
-    except OSError as e:
-        return f"Error: {e}"
 
 def search_code(pattern, file_pattern):
     try:
-        root = check_path_permission("/testbed", must_exist=True)
+        result = docker_exec([
+            "grep",
+            "-rn",
+            "--include", file_pattern,
+            "--exclude-dir=.git",
+            "--exclude-dir=.venv",
+            "--exclude-dir=__pycache__",
+            "--exclude-dir=node_modules",
+            "-F",
+            "--",
+            pattern,
+            CONTAINER_TESTBED,
+        ])
 
-        if not root.is_dir():
-            return "Error: Search root is not a directory"
+        if result["exit_code"] == 1:
+            return ""
 
-        files = list_files(str(root), file_pattern)
+        if result["exit_code"] != 0:
+            return result["stderr"]
 
-        if files.startswith("Error:"):
-            return files
+        return result["stdout"]
 
-        occurrences = []
-
-        for filepath in files.splitlines():
-            if not filepath:
-                continue
-
-            try:
-                filepath = check_path_permission(
-                    filepath,
-                    must_exist=True
-                )
-
-                if not filepath.is_file():
-                    continue
-
-                if EXCLUDED_DIRS.intersection(filepath.parts):
-                    continue
-
-                with filepath.open("r", encoding="utf-8") as f:
-                    for line_number, line in enumerate(f, start=1):
-                        if pattern in line:
-                            occurrences.append(
-                                f"{filepath}:{line_number} {line.rstrip()}"
-                            )
-
-            except (PermissionError, OSError, UnicodeError):
-                continue
-
-        return "\n".join(occurrences)
-
-    except PermissionError as e:
-        return f"Error: {e}"
-    except OSError as e:
+    except Exception as e:
         return f"Error searching code: {e}"
 
+
 def search_function_or_class_definition_in_code(name):
-    results = []
-
     try:
-        root = check_path_permission("/testbed", must_exist=True)
+        escaped = re.escape(name)
 
-        if not root.is_dir():
-            return "Error: Search root is not a directory"
+        pattern = (
+            rf"^[[:space:]]*(async[[:space:]]+)?def[[:space:]]+"
+            rf"{escaped}[[:space:]]*\("
+            rf"|^[[:space:]]*class[[:space:]]+"
+            rf"{escaped}([^[:alnum:]_]|$)"
+        )
 
-        files = list_files(str(root), "*.py")
+        result = docker_exec([
+            "grep",
+            "-rnE",
+            "--include=*.py",
+            "--exclude-dir=.git",
+            "--exclude-dir=.venv",
+            "--exclude-dir=__pycache__",
+            "--",
+            pattern,
+            CONTAINER_TESTBED,
+        ])
 
-        if files.startswith("Error:"):
-            return files
-
-        escaped_name = re.escape(name)
-
-        patterns = [
-            rf"^\s*def\s+{escaped_name}\s*\(",
-            rf"^\s*async\s+def\s+{escaped_name}\s*\(",
-            rf"^\s*class\s+{escaped_name}\b",
-        ]
-
-        for filepath in files.splitlines():
-            if not filepath:
-                continue
-
-            try:
-                filepath = check_path_permission(
-                    filepath,
-                    must_exist=True
-                )
-
-                if not filepath.is_file():
-                    continue
-
-                if EXCLUDED_DIRS.intersection(filepath.parts):
-                    continue
-
-                with filepath.open("r", encoding="utf-8") as f:
-                    for line_number, line in enumerate(f, start=1):
-                        for pattern in patterns:
-                            if re.search(pattern, line):
-                                results.append(
-                                    f"{filepath}:{line_number} "
-                                    f"{line.rstrip()}"
-                                )
-                                break
-
-            except (PermissionError, OSError, UnicodeError):
-                continue
-
-        if not results:
+        if result["exit_code"] == 1:
             return f"{name} not found"
 
-        return "\n".join(results)
+        if result["exit_code"] != 0:
+            return result["stderr"]
 
-    except PermissionError as e:
-        return f"Error: {e}"
-    except OSError as e:
+        return result["stdout"]
+
+    except Exception as e:
         return f"Error searching definitions: {e}"
+
 
 def find_references(name, filepath, line):
     try:
-        filepath = check_path_permission(
+        filepath = validate_container_path(filepath, must_exist=True)
+
+        result = docker_exec([
+            "/usr/local/bin/find-python-references",
+            name,
             filepath,
-            must_exist=True
-        )
+            str(line),
+        ])
 
-        if not filepath.is_file():
-            return f"Error: Not a file: {filepath}"
+        return result["stdout"] or result["stderr"]
 
-        if not isinstance(line, int) or line < 1:
-            return "Error: Invalid line number"
+    except Exception as e:
+        return f"Error finding references: {e}"
 
-        source = filepath.read_text(encoding="utf-8")
-        tree = ast.parse(source, filename=str(filepath))
-
-    except PermissionError as e:
-        return f"Error: {e}"
-    except (OSError, SyntaxError, UnicodeError) as e:
-        return f"Error parsing {filepath}: {e}"
-
-    definition = None
-
-    for node in ast.walk(tree):
-        if isinstance(
-            node,
-            (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
-        ):
-            if node.name == name and node.lineno == line:
-                definition = node
-                break
-
-    if definition is None:
-        return f"Error: Definition '{name}' not found at line {line}"
-
-    try:
-        root = check_path_permission("/testbed", must_exist=True)
-
-        if not root.is_dir():
-            return "Error: Search root is not a directory"
-
-    except PermissionError as e:
-        return f"Error: {e}"
-
-    results = set()
-
-    for py_file in root.rglob("*.py"):
-        if EXCLUDED_DIRS.intersection(py_file.parts):
-            continue
-
-        try:
-            py_file = check_path_permission(
-                py_file,
-                must_exist=True
-            )
-
-            if not py_file.is_file():
-                continue
-
-            code = py_file.read_text(encoding="utf-8")
-            parsed = ast.parse(code, filename=str(py_file))
-            lines = code.splitlines()
-
-        except (PermissionError, OSError, SyntaxError, UnicodeError):
-            continue
-
-        for node in ast.walk(parsed):
-
-            if isinstance(node, ast.Name) and node.id == name:
-                results.add(
-                    f"{py_file}:{node.lineno} "
-                    f"{lines[node.lineno - 1].strip()}"
-                )
-
-            elif isinstance(node, ast.Attribute) and node.attr == name:
-                results.add(
-                    f"{py_file}:{node.lineno} "
-                    f"{lines[node.lineno - 1].strip()}"
-                )
-
-    return "\n".join(sorted(results))
 
 def run_command(command, workdir):
     try:
-        workdir = check_path_permission(
+        workdir = validate_container_path(
             workdir,
-            must_exist=True
+            must_exist=True,
         )
 
-        if not workdir.is_dir():
-            return {
-                "error": "Working directory is not a directory"
-            }
+        if not isinstance(command, str) or not command.strip():
+            return {"error": "Invalid command"}
 
-        result = subprocess.run(
-            shlex.split(command),
-            capture_output=True,
-            text=True,
-            cwd=str(workdir),
-            timeout=120
+        return docker_exec(
+            ["bash", "-lc", command],
+            workdir=workdir,
+            timeout=120,
         )
 
-        return {
-            "exit_code": result.returncode,
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-        }
-
-    except PermissionError as e:
-        return {"error": str(e)}
-
-    except subprocess.TimeoutExpired:
-        return {"error": "Command execution timed out"}
-
-    except (OSError, subprocess.SubprocessError) as e:
+    except Exception as e:
         return {"error": f"Error executing command: {e}"}
-
-def configure_swebench(docker_container, task_eval_script):
-    global container, eval_script
-
-    container = docker_container
-    eval_script = task_eval_script
 
 
 def run_tests():
-    if container is None or eval_script is None:
-        return "Error: SWE-bench environment not initialized"
+    if not eval_script:
+        return {"error": "Evaluation script not configured"}
 
     try:
-        result = container.exec_run(
+        return docker_exec(
             ["bash", "-lc", eval_script],
             workdir="/testbed",
-            demux=True,
+            timeout=600,
         )
 
-        stdout, stderr = result.output
-
-        return {
-            "exit_code": result.exit_code,
-            "stdout": stdout.decode(errors="replace") if stdout else "",
-            "stderr": stderr.decode(errors="replace") if stderr else "",
-        }
-
     except Exception as e:
-        return f"Error executing tests: {e}"
+        return {"error": f"Error executing tests: {e}"}
 
 
 def get_patch():
     try:
-        repo_path = check_path_permission(
-            "/testbed",
-            must_exist=True
-        )
+        result = docker_exec([
+            "git",
+            "-c",
+            "core.fileMode=false",
+            "diff",
+        ], workdir="/testbed", timeout=30)
 
-        if not repo_path.is_dir():
-            return "Error: Repository directory not found"
+        if result["exit_code"] != 0:
+            return f"Error getting patch: {result['stderr']}"
 
-        result = subprocess.run(
-            [
-                "git",
-                "-c",
-                "core.fileMode=false",
-                "diff",
-            ],
-            capture_output=True,
-            text=True,
-            cwd=str(repo_path),
-            timeout=30
-        )
+        return result["stdout"]
 
-        if result.returncode != 0:
-            return f"Error getting patch:\n{result.stderr}"
-
-        return result.stdout
-
-    except PermissionError as e:
-        return f"Error: {e}"
-
-    except subprocess.TimeoutExpired:
-        return "Error: Git diff timed out"
-
-    except (OSError, subprocess.SubprocessError) as e:
+    except Exception as e:
         return f"Error getting patch: {e}"
-    
 
-# For testing purposes
 
-# print(read_file("agent_mbpp/__main__.py", 10, 20), end='')
+# if __name__ == "__main__":
 
-# print(edit_file("test.py", "# Should we", "#hhhhhhhhhh"), end="")
+#     configure_swebench(
+#         image="swebench/sweb.eval.x86_64.sympy_1776_sympy-18189:latest",
+#         task_eval_script="...",
+#         testbed_path="/tmp/swebench/repository",
+#     )
 
-# print(list_files("/testbed", "*.py"))
+#     print(run_command("pwd", "."))
 
-# print(search_code("def search_code(pattern, file_pattern)", "*.py"))
+#     # print(list_files("..", "*.py"))
 
-# print(search_function_or_class_definition_in_code("DEFINITION_PATTERNS"))
+#     # print(search_code("def sympify", "*.py"))
 
-# print(find_references("ExecutionResult", "/sgoinfre/hdaoun/agent_smith/sandbox/schemas.py", 40))
+#     # print(search_function_or_class_definition_in_code("sympify"))
 
-run_command("cat schemas.py", "/sgoinfre/hdaoun/agent_smith/sandbox")
+#     # print(get_patch())
+#     stop_swebench()
