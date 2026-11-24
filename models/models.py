@@ -35,8 +35,7 @@ class StepMetrics(BaseModel):
     sandbox_input: str
     sandbox_output: str
     retries: int
-    timestamp: str = Field(default_factory=lambda: datetime.now().
-    isoformat())
+    timestamp: str = Field(default_factory=lambda: datetime.now().isoformat())
 
 class SolutionOutput(BaseModel):
     """Output from student solution - this is what students must produce."""
@@ -52,5 +51,4 @@ class SolutionOutput(BaseModel):
     total_time_seconds: float
     steps: List["StepMetrics"] = Field(default_factory=list)
     error: Optional[str] = None
-    timestamp: str = Field(default_factory=lambda: datetime.now().
-    isoformat())
+    timestamp: str = Field(default_factory=lambda: datetime.now().isoformat())
