@@ -17,7 +17,12 @@ class DockerManager:
         self.container: Optional[Container] = None
 
     def pull_image(self):
-        print(f"Pulling image: {self.image}")
+        try:
+            self.client.images.get(self.image)
+            return
+        except docker.errors.ImageNotFound:
+            pass
+        print(f"Pulling image: {self.image}", file=sys.stderr, flush=True)
         self.client.images.pull(self.image)
 
     def start(self):
@@ -42,34 +47,14 @@ class DockerManager:
 
         return self.container
 
-    def execute(self, command, workdir=None, timeout=120):
-        if self.container is None:
-            raise RuntimeError("Container not started")
-
-        result = self.container.exec_run(
-            command,
-            workdir=workdir or self.working_dir,
-            demux=True,
-            environment={"HOME": "/root"},
-        )
-
-        stdout, stderr = result.output
-
-        return {
-            "exit_code": result.exit_code,
-            "stdout": stdout.decode(errors="replace") if stdout else "",
-            "stderr": stderr.decode(errors="replace") if stderr else "",
-        }
-
     def stop(self):
         if self.container is None:
             return
-
+        container, self.container = self.container, None
         try:
-            self.container.stop(timeout=5)
-        finally:
-            self.container.remove(force=True)
-            self.container = None
+            container.remove(force=True, v=True)  # force kills immediately, no 5s wait
+        except docker.errors.NotFound:
+            pass
 
     def __enter__(self):
         self.pull_image()
