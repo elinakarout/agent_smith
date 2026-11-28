@@ -1,5 +1,11 @@
+import argparse
+import atexit
+import json
 import re
+import signal
+import sys
 from pathlib import PurePosixPath
+from typing import Optional
 
 from docker_manager.manager import DockerManager
 from mcp.server.mcpserver import MCPServer
@@ -8,10 +14,10 @@ CONTAINER_TESTBED = "/testbed"
 
 MAX_OUTPUT_LINES = 100
 MAX_OUTPUT_CHARS = 8000
-MAX_READ_LINES = 400  
+MAX_READ_LINES = 400
 
 COMMAND_TIMEOUT = 120
-TESTS_TIMEOUT = 600
+TESTS_TIMEOUT = 300
 
 IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -85,40 +91,61 @@ for path, ln, text in found:
     print(f"{path}:{ln} {text}")
 """
 
-mcp = MCPServer("MCP Server")
+mcp = MCPServer("SWE-bench Tools")
 
-docker_manager = None
-eval_script = None
+docker_manager: Optional[DockerManager] = None
+eval_script: Optional[str] = None
+_pending_image: Optional[str] = None
 
 
-def configure_swebench(image, task_eval_script, testbed_path=None):
+def configure_swebench(
+    image: str,
+    task_eval_script: str,
+) -> None:
+    """Pull the image and start the container right now."""
     global docker_manager, eval_script
 
-    if not testbed_path:
-        raise ValueError("testbed_path is required")
-
-    docker_manager = DockerManager(
-        image=image,
-        working_dir=CONTAINER_TESTBED,
-    )
+    if docker_manager is not None:
+        raise RuntimeError("Docker environment already initialized")
 
     eval_script = task_eval_script
+    docker_manager = DockerManager(image=image, working_dir=CONTAINER_TESTBED)
 
-    docker_manager.pull_image()
-    docker_manager.start()
+    try:
+        docker_manager.pull_image()
+        docker_manager.start()
+    except Exception:
+        stop_swebench()
+        raise
 
 
-def stop_swebench():
-    global docker_manager
+def prepare_swebench(image: str, task_eval_script: str) -> None:
+    """Remember the task; the container starts on the first tool call that needs it."""
+    global _pending_image, eval_script
 
+    _pending_image = image
+    eval_script = task_eval_script
+
+
+def stop_swebench() -> None:
+    """Remove the container (safe to call more than once)."""
+    global docker_manager, _pending_image
+
+    _pending_image = None
     if docker_manager is not None:
-        docker_manager.stop()
-        docker_manager = None
+        manager, docker_manager = docker_manager, None
+        manager.stop()
 
 
-def _ensure_container():
+def _ensure_container() -> None:
+    if docker_manager is None and _pending_image is not None:
+        configure_swebench(_pending_image, eval_script)
+
     if docker_manager is None or docker_manager.container is None:
-        raise RuntimeError("Docker environment not initialized")
+        raise RuntimeError(
+            "Docker environment not initialized (the server was started "
+            "without a task file)"
+        )
 
 
 def validate_container_path(filepath, must_exist=False):
@@ -214,28 +241,42 @@ def _truncate_lines(lines, hint, limit=MAX_OUTPUT_LINES):
     return f"{shown}\n\n[TRUNCATED: showing {limit} of {len(lines)} lines. {hint}]"
 
 
-def _truncate_text(text, limit=MAX_OUTPUT_CHARS):
-    """Keep head and tail of long text; the end usually holds the summary."""
+def _truncate_text(text, limit=MAX_OUTPUT_CHARS, head_ratio=0.5):
+    """Keep head and tail of long text. head_ratio is the share of the budget
+    given to the head; the tail usually holds the summary, so lower it for tests."""
     if len(text) <= limit:
         return text
-    half = limit // 2
+    head = int(limit * head_ratio)
+    tail = limit - head
     omitted = len(text) - limit
     return (
-        f"{text[:half]}\n\n"
+        f"{text[:head]}\n\n"
         f"[TRUNCATED: {omitted} characters omitted from the middle]\n\n"
-        f"{text[-half:]}"
+        f"{text[-tail:]}"
     )
 
 
-def _format_exec(result, timeout_note):
+def _format_exec(
+    result,
+    timeout_note,
+    stdout_limit=MAX_OUTPUT_CHARS,
+    stderr_limit=MAX_OUTPUT_CHARS,
+    head_ratio=0.5,
+):
     parts = []
     if result["timed_out"]:
         parts.append(f"[TIMEOUT: {timeout_note}. Output below is partial.]")
     parts.append(f"exit_code: {result['exit_code']}")
     if result["stdout"]:
-        parts.append("--- stdout ---\n" + _truncate_text(result["stdout"]))
+        parts.append(
+            "--- stdout ---\n"
+            + _truncate_text(result["stdout"], stdout_limit, head_ratio)
+        )
     if result["stderr"]:
-        parts.append("--- stderr ---\n" + _truncate_text(result["stderr"]))
+        parts.append(
+            "--- stderr ---\n"
+            + _truncate_text(result["stderr"], stderr_limit, head_ratio)
+        )
     return "\n".join(parts)
 
 
@@ -268,8 +309,11 @@ def _git_grep(flags, pattern, file_pattern, empty_message):
 
 
 @mcp.tool()
-def read_file(filepath, start_line, end_line):
-    """Read a file with line numbers ('N: content'). Shows at most 400 lines per call."""
+def read_file(filepath: str, start_line: int, end_line: int) -> str:
+    """Read lines start_line..end_line of a file, one 'N: content' per line.
+
+    Shows at most 400 lines per call; a hint says where to continue.
+    """
     try:
         start_line = int(start_line)
         end_line = int(end_line)
@@ -312,8 +356,12 @@ def read_file(filepath, start_line, end_line):
 
 
 @mcp.tool()
-def edit_file(filepath, old_str, new_str):
-    """Replace one exact occurrence of old_str with new_str in a file."""
+def edit_file(filepath: str, old_str: str, new_str: str) -> str:
+    """Replace exactly one occurrence of old_str with new_str in a file.
+
+    Fails (and changes nothing) if old_str is missing or matches several places.
+    Reports a syntax error if the edited .py file no longer compiles.
+    """
     try:
         if not old_str:
             return "Error: old_str cannot be empty"
@@ -351,8 +399,8 @@ def edit_file(filepath, old_str, new_str):
 
 
 @mcp.tool()
-def list_files(directory, pattern="*"):
-    """List files under a directory matching a name pattern."""
+def list_files(directory: str, pattern: str = "*") -> str:
+    """List files under a directory whose name matches a pattern (e.g. '*.py')."""
     try:
         directory = validate_container_path(directory, must_exist=True)
 
@@ -380,8 +428,11 @@ def list_files(directory, pattern="*"):
 
 
 @mcp.tool()
-def search_code(pattern, file_pattern="*.py"):
-    """grep-like regex search. Output: /abs/path:line content"""
+def search_code(pattern: str, file_pattern: str = "*.py") -> str:
+    """grep-like extended-regex search over the repository.
+
+    Output: /abs/path:line content. file_pattern limits which files are searched.
+    """
     try:
         if not isinstance(pattern, str) or not pattern:
             return "Error: pattern cannot be empty"
@@ -395,7 +446,7 @@ def search_code(pattern, file_pattern="*.py"):
 
 
 @mcp.tool()
-def search_function_or_class_definition_in_code(name):
+def search_function_or_class_definition_in_code(name: str) -> str:
     """Find where a function or class is defined. Output: /abs/path:line content"""
     try:
         if not isinstance(name, str) or not IDENTIFIER_RE.match(name):
@@ -414,10 +465,11 @@ def search_function_or_class_definition_in_code(name):
 
 
 @mcp.tool()
-def find_references(name, filepath, line):
-    """Find code usages of the symbol `name` located at filepath:line.
+def find_references(name: str, filepath: str, line: int) -> str:
+    """Find code usages of the symbol `name` that appears at filepath:line.
 
     Output: /abs/path:line content (the file you pass is listed first).
+    Errors if the symbol is not on that line.
     """
     try:
         if not isinstance(name, str) or not IDENTIFIER_RE.match(name):
@@ -445,15 +497,17 @@ def find_references(name, filepath, line):
         lines = result["stdout"].splitlines()
         if not lines:
             return f"No references to {name!r} found."
-        return _truncate_lines(lines, "Pass a more specific symbol or check usages with search_code.")
+        return _truncate_lines(
+            lines, "Pass a more specific symbol or check usages with search_code."
+        )
 
     except Exception as e:
         return f"Error finding references: {e}"
 
 
 @mcp.tool()
-def run_command(command, workdir=CONTAINER_TESTBED):
-    """Run a shell command. Returns exit code, stdout and stderr as text."""
+def run_command(command: str, workdir: str = CONTAINER_TESTBED) -> str:
+    """Run a shell command in workdir. Returns exit code, stdout and stderr as text."""
     try:
         workdir = validate_container_path(workdir, must_exist=True)
 
@@ -472,7 +526,7 @@ def run_command(command, workdir=CONTAINER_TESTBED):
 
 
 @mcp.tool()
-def run_tests():
+def run_tests() -> str:
     """Run the task's evaluation script. Returns exit code, stdout and stderr as text."""
     if not eval_script:
         return "Error: evaluation script not configured"
@@ -484,7 +538,11 @@ def run_tests():
             timeout=TESTS_TIMEOUT,
         )
         return _format_exec(
-            result, f"tests exceeded {TESTS_TIMEOUT}s and were killed"
+            result,
+            f"tests exceeded {TESTS_TIMEOUT}s and were killed",
+            stdout_limit=5000,
+            stderr_limit=1000,
+            head_ratio=0.2,
         )
 
     except Exception as e:
@@ -492,7 +550,7 @@ def run_tests():
 
 
 @mcp.tool()
-def get_patch():
+def get_patch() -> str:
     """Return the unified git diff of all changes made in the repository."""
     try:
         result = docker_exec(
@@ -508,3 +566,45 @@ def get_patch():
 
     except Exception as e:
         return f"Error getting patch: {e}"
+
+
+def _log(message: str) -> None:
+    print(message, file=sys.stderr, flush=True)
+
+
+def _load_task(path: str) -> dict:
+    with open(path, encoding="utf-8") as f:
+        task = json.load(f)
+    missing = [k for k in ("docker_image", "eval_script") if not task.get(k)]
+    if missing:
+        raise ValueError(f"task file is missing: {', '.join(missing)}")
+    return task
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="SWE-bench MCP tools (stdio server)")
+    parser.add_argument(
+        "--task-file",
+        default=None,
+        help="Path to the SWE-bench task JSON (docker_image, eval_script)",
+    )
+    args, _ = parser.parse_known_args()
+
+    atexit.register(stop_swebench)
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+
+    if args.task_file:
+        try:
+            task = _load_task(args.task_file)
+        except (OSError, ValueError) as e:
+            _log(f"Error: cannot load task file {args.task_file!r}: {e}")
+            sys.exit(1)
+        prepare_swebench(task["docker_image"], task["eval_script"])
+    else:
+        _log("No --task-file given: tools that need the container will return errors.")
+
+    mcp.run(transport="stdio")
+
+
+if __name__ == "__main__":
+    main()
