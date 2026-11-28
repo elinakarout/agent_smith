@@ -3,9 +3,9 @@ from sandbox.executor import SandboxExecutor, SandboxConfig
 from llm.prompts import swe_prompt, mbpp_prompt
 from typing import Dict, List, Optional
 from sandbox.config import read_config
+from llm.extractor import extract_code
 from dataclasses import dataclass
 from llm.agent import LLMClient
-from llm.extractor import extract_code
 import textwrap
 import json
 
@@ -45,8 +45,11 @@ class Orchestrator():
     def answer(self):
         if (self.benchmark == "mbpp"):
             self.answermbpp()
-        else:
+        elif (self.answermbpp == "swe"):
             self.answerswe()
+        else:
+            print("batata")
+            exit(1)
 
     def answermbpp(self):
         solution_dict = {
@@ -66,15 +69,15 @@ class Orchestrator():
         config = SandboxConfig()
         executor = SandboxExecutor(config)
         curr_step = 1
+        client = LLMClient(self.model_name, self.api_url, MBPP_LIMITS.timeout_seconds, MBPP_LIMITS.max_input_tokens)
+        system_prompt, mbpp_user_prompt = mbpp_prompt(self.task)
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": mbpp_user_prompt},
+        ]
         while True:
-            client = LLMClient(self.model_name, self.api_url, MBPP_LIMITS.timeout_seconds, MBPP_LIMITS.max_input_tokens)
-            system_prompt, mbpp_user_prompt = mbpp_prompt(self.task)
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": mbpp_user_prompt},
-            ]
-
             sol = client.llm_asker(messages)
+            messages.append({"role": "assistant", "content": sol.answer or ""})
 
             code, warning = extract_code(sol.answer or "")
             result = None
@@ -83,9 +86,26 @@ class Orchestrator():
             else:
                 # [MCP]: Inject `run_tests` from `mcp_tools_mbpp.py` and detect
                 # `final_answer(solution_code)` calls from the sandbox result
-                result = executor.execute_code(code)
-                sandbox_output = result.stdout
+                test_imports = "\n".join(self.task.test_imports)
+                test_cases = "\n".join(self.task.test_list)
 
+                test_code = "\n\n".join([
+                    test_imports,
+                    code,
+                    test_cases,
+                    'print("ALL TESTS PASSED")'
+                ])
+                result = executor.execute_code(test_code)
+                status = getattr(result.status_code, "value", result.status_code)
+                sandbox_output = "\n".join([
+                    f"Execution status: {status}",
+                    "STDOUT:",
+                    result.stdout or "",
+                    "STDERR:",
+                    result.stderr or "",
+                    "ERROR:",
+                    result.error_message or "None"
+                ])
             step_metr = StepMetrics(
                 step=curr_step,
                 input_tokens=sol.input_tokens,
@@ -104,18 +124,33 @@ class Orchestrator():
             solution_dict["total_input_tokens"] += step_metr.input_tokens
             solution_dict["total_output_tokens"] += step_metr.output_tokens
             solution_dict["total_time_seconds"] += (step_metr.request_time_ms / 1000)
-            messages.append({"role": "user", "content": f"Observation:\n{sandbox_output}"})
+            solution_dict["steps"].append(step_metr)
 
             # [MCP]: Set `solution_dict["success"] = True` and `solution_dict["solution"] = final_answer_value`
             # once `final_answer(...)` is called inside the sandbox.
 
-            solution_dict["steps"].append(step_metr)
+
+            if result is not None:
+                status_value = getattr(result.status_code, "value", result.status_code)
+                if (str(status_value).lower() == "success" and "ALL TESTS PASSED" in (result.stdout or "")):
+                    solution_dict["success"] = True
+                    solution_dict["solution"] = code
+                    break
+            messages.append({
+                "role": "user",
+                "content": "\n".join([
+                    "Your previous solution failed during execution.",
+                    "",
+                    "Here is the sandbox output:",
+                    "",
+                    sandbox_output,
+                    "",
+                    "Please analyze the error, fix your implementation,",
+                    "and provide the complete corrected solution."
+                ])
+            })
             if step_metr.output_tokens >= MBPP_LIMITS.per_step_max_tokens:
                 solution_dict["error"] = "Max output token exceeded"
-                break
-            if result is not None and result.status_code == "success":
-                solution_dict["success"] = True
-                solution_dict["solution"] = code
                 break
             if solution_dict["iterations"] >= MBPP_LIMITS.max_iterations:
                 solution_dict["error"] = "Max iterations exceeded"
@@ -140,6 +175,7 @@ class Orchestrator():
         print(final_result.solution)
         print(len(final_result.steps))
         print(f'\n\n\n\n{final_result.success}')
+        print(self.task.test_list)
 
 
     def answerswe(self):
@@ -157,7 +193,15 @@ class Orchestrator():
             "steps": [],
             "error": None,
         }
-
+        config = SandboxConfig()
+        executor = SandboxExecutor(config)
+        curr_step = 1
+        client = LLMClient(self.model_name, self.api_url, SWEBENCH_LIMITS.timeout_seconds, SWEBENCH_LIMITS.max_input_tokens)
+        system_prompt, swe_user_prompt = swe_prompt(self.task)
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": swe_user_prompt},
+        ]
         # [MCP]: Inject dynamic MCP tool documentation / sandbox manual into system_prompt
         # once the MCP client lists tools from the SWE-bench MCP server.
         # Example:
@@ -167,90 +211,108 @@ class Orchestrator():
         # Start/connect the SWE-bench Docker environment and MCP server
         # (using self.task.docker_image and self.task.eval_script) before entering the loop.
         # Ensure cleanup (closing MCP session + removing Docker container) runs in a `finally:`.
-        curr_step = 1
-        try:
-            while curr_step <= SWEBENCH_LIMITS.max_iterations:
-                client = LLMClient(self.model_name, self.api_url, SWEBENCH_LIMITS.timeout_seconds, SWEBENCH_LIMITS.per_step_max_tokens)
-                system_prompt, swe_user_prompt = swe_prompt(self.task)
-                messages: List[Dict[str, str]] = [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": swe_user_prompt},
-                ]
+        while True:
 
-                sol = client.llm_asker(messages)
-                raw_llm_output = sol.answer or ""
-                messages.append({"role": "assistant", "content": raw_llm_output})
+            sol = client.llm_asker(messages)
+            raw_llm_output = sol.answer or ""
+            messages.append({"role": "assistant", "content": sol.answer or ""})
 
-                code, warning = extract_code(raw_llm_output)
+            code, warning = extract_code(sol.answer or "")
 
-                # [MCP]: When executing `code` in the sandbox, wire MCP tool calls
-                # (read_file, edit_file, list_files, search_code,
-                # search_function_or_class_definition_in_code, find_references,
-                # run_tests, get_patch, run_command) to the SWE-bench MCP server.
-                # Also detect if the sandboxed code invoked `final_answer(patch)` and capture.
+            # [MCP]: When executing `code` in the sandbox, wire MCP tool calls
+            # (read_file, edit_file, list_files, search_code,
+            # search_function_or_class_definition_in_code, find_references,
+            # run_tests, get_patch, run_command) to the SWE-bench MCP server.
+            # Also detect if the sandboxed code invoked `final_answer(patch)` and capture.
 
-                config = SandboxConfig()
-                executor = SandboxExecutor(config)
+            result = None
+            if code is None:
+                sandbox_output = warning or "Extraction failed"
+            else:
+                result = executor.execute_code(code)
+                status = getattr(result.status_code, "value", result.status_code)
+                sandbox_output = "\n".join([
+                    f"Execution status: {status}",
+                    "STDOUT:",
+                    result.stdout or "",
+                    "STDERR:",
+                    result.stderr or "",
+                    "ERROR:",
+                    result.error_message or "None"
+                ])
+                if warning:
+                    sandbox_output = "\n".join([warning, sandbox_output])
 
-                result = None
-                if code is None:
-                    sandbox_output = warning or "Extraction failed"
-                else:
-                    result = executor.execute_code(code)
-                    stdout_text = getattr(result, "stdout", "") or ""
-                    stderr_text = getattr(result, "stderr", "") or ""
-                    combined_out = f"{stdout_text}\n{stderr_text}".strip()
-                    sandbox_output = (f"{warning}\n{combined_out}".strip() if warning else combined_out)
+            step_metr = StepMetrics(
+                step=curr_step,
+                input_tokens=sol.input_tokens,
+                output_tokens=sol.output_tokens,
+                request_time_ms=sol.request_time_ms,
+                api_url=sol.url,
+                model_name=sol.model_name,
+                llm_output=raw_llm_output,
+                sandbox_input=code or "",
+                sandbox_output=sandbox_output,
+                retries=sol.retries,
+            )
 
-                step_metr = StepMetrics(
-                    step=curr_step,
-                    input_tokens=sol.input_tokens,
-                    output_tokens=sol.output_tokens,
-                    request_time_ms=sol.request_time_ms,
-                    api_url=sol.url,
-                    model_name=sol.model_name,
-                    llm_output=raw_llm_output,
-                    sandbox_input=code or "",
-                    sandbox_output=sandbox_output,
-                    retries=sol.retries,
-                )
+            solution_dict["steps"].append(step_metr)
+            solution_dict["iterations"] = curr_step
+            solution_dict["total_requests"] += 1 + sol.retries
+            solution_dict["total_input_tokens"] += step_metr.input_tokens
+            solution_dict["total_output_tokens"] += step_metr.output_tokens
+            solution_dict["total_time_seconds"] += step_metr.request_time_ms / 1000.0
+            # Feed sandbox observation back into conversation history for the next iteration
 
-                solution_dict["steps"].append(step_metr)
-                solution_dict["iterations"] = curr_step
-                solution_dict["total_requests"] += 1 + sol.retries
-                solution_dict["total_input_tokens"] += step_metr.input_tokens
-                solution_dict["total_output_tokens"] += step_metr.output_tokens
-                solution_dict["total_time_seconds"] += step_metr.request_time_ms / 1000.0
-                # Feed sandbox observation back into conversation history for the next iteration
-                messages.append({"role": "user", "content": f"Observation:\n{sandbox_output}"})
+            #  [MCP]: Mark `solution_dict["success"] = True` and store the patch from
+            # `final_answer(get_patch())` in `solution_dict["solution"]` once submitted.
+            if solution_dict["success"]:
+                break
 
-                #  [MCP]: Mark `solution_dict["success"] = True` and store the patch from
-                # `final_answer(get_patch())` in `solution_dict["solution"]` once submitted.
-                if solution_dict["success"]:
-                    break
+            if solution_dict["iterations"] >= SWEBENCH_LIMITS.max_iterations:
+                solution_dict["error"] = "Max iterations exceeded"
+                break
+            if solution_dict["total_input_tokens"] >= SWEBENCH_LIMITS.max_input_tokens:
+                solution_dict["error"] = "Max input tokens exceeded"
+                break
+            if solution_dict["total_output_tokens"] >= SWEBENCH_LIMITS.max_output_tokens:
+                solution_dict["error"] = "Max output tokens exceeded"
+                break
+            if solution_dict["total_time_seconds"] >= SWEBENCH_LIMITS.timeout_seconds:
+                solution_dict["error"] = "Time exceeded"
+                break
+            messages.append({
+                "role": "user",
+                "content": "\n".join([
+                    "Your previous solution failed during execution.",
+                    "",
+                    "Here is the sandbox output:",
+                    "",
+                    sandbox_output,
+                    "",
+                    "Please analyze the error, fix your implementation,",
+                    "and provide the complete corrected solution."
+                ])
+            })
 
-                if solution_dict["iterations"] >= SWEBENCH_LIMITS.max_iterations:
-                    solution_dict["error"] = "Max iterations exceeded"
-                    break
-                if solution_dict["total_input_tokens"] >= SWEBENCH_LIMITS.max_input_tokens:
-                    solution_dict["error"] = "Max input tokens exceeded"
-                    break
-                if solution_dict["total_output_tokens"] >= SWEBENCH_LIMITS.max_output_tokens:
-                    solution_dict["error"] = "Max output tokens exceeded"
-                    break
-                if solution_dict["total_time_seconds"] >= SWEBENCH_LIMITS.timeout_seconds:
-                    solution_dict["error"] = "Time exceeded"
-                    break
-
-                curr_step += 1
-
-        finally:
-            # CLEAN up docker
-            pass
+            curr_step += 1
 
         solution_dict["system_prompt"] = system_prompt
-        self.solution = SolutionOutput(**solution_dict)
-        return self.solution
+        final_result = SolutionOutput(**solution_dict)
+        if not final_result.error:
+            final_result.error = ("Worked perfectly" if final_result.success else "Solution was not validated")
+
+        if not final_result.solution:
+            final_result.solution = "No solution"
+
+        self.solution = final_result
+
+        print(final_result.error)
+        print(final_result.solution)
+        print(len(final_result.steps))
+        print(f"\n\n\n\n{final_result.success}")
+
+        return final_result
 
 
 if __name__ == "__main__":

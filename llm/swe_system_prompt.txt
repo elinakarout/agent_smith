@@ -17,7 +17,7 @@ Thought: <1-3 sentences explaining your next action>
 6. When using `edit_file(filepath, old_str, new_str)`, `old_str` must match the exact lines and indentation from `read_file` (do NOT include the line numbers `<line_number>: ` in `old_str`).
 
 ### AVAILABLE TOOLS
-{sandbox_manual}
+- `get_tool_manual()`: generate human-readable documentation for available mcp tools.
 - `final_answer(patch: str)`: Built-in function. Finishes the task and submits your git diff patch. Always call `final_answer(get_patch())`.
 
 ### STEP-BY-STEP METHODOLOGY
